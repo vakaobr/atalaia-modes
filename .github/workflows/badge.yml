@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2026 The Atalaia contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The verified badge, signed by the project's CI key (keys/project/7275108d2e3fe583.json).
+# A maintainer runs it by hand (Actions > Verified badge > Run workflow) for a version they
+# reviewed; only people with write access can start it. It signs with
+# tools/registry_check.py badge, checks the whole registry with the same lint as registry.yml,
+# and commits the badge to main, which then publishes through registry.yml.
+#
+# The private key is the secret ATALAIA_PROJECT_CI_KEY (encrypted PEM) with its passphrase in
+# ATALAIA_PROJECT_CI_KEY_PASSPHRASE. It is written only to the runner's temporary folder, never
+# into a checkout. The project's root key (keys/project/d9521a79030ce544.json) is held offline
+# by the maintainer and never comes here. If the CI key is ever exposed: list it in
+# keys/revoked.json, delete both secrets, and sign the badges again with a new key
+# (docs/community/keys.md in the Atalaia repository).
+name: Verified badge
+
+on:
+  workflow_dispatch:
+    inputs:
+      id:
+        description: "The mode's id (as in index.json)"
+        required: true
+      version:
+        description: "The version to badge"
+        required: true
+      remove:
+        description: "Take the badge away instead"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: badge
+  cancel-in-progress: false
+
+env:
+  ATALAIA_REPOSITORY: vakaobr/atalaia-project
+  ATALAIA_REF: 402748413e4b6786abc7933555087a005c0837f8  # keep in step with registry.yml
+  ATALAIA: ${{ github.workspace }}/atalaia
+
+jobs:
+  badge:
+    name: Sign or remove the verified badge
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: registry
+          ref: main
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.ATALAIA_REPOSITORY }}
+          ref: ${{ env.ATALAIA_REF }}
+          path: atalaia
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install tools
+        run: pip install -r "$ATALAIA/simulator/requirements.txt" check-jsonschema reuse
+      - name: Sign (or remove) the badge
+        working-directory: registry
+        env:
+          KEY_PEM: ${{ secrets.ATALAIA_PROJECT_CI_KEY }}
+          ATALAIA_MODE_KEY_PASSPHRASE: ${{ secrets.ATALAIA_PROJECT_CI_KEY_PASSPHRASE }}
+          MODE_ID: ${{ inputs.id }}
+          MODE_VERSION: ${{ inputs.version }}
+          REMOVE: ${{ inputs.remove }}
+        run: |
+          key="$RUNNER_TEMP/project-ci.pem"
+          umask 077
+          printf '%s\n' "$KEY_PEM" > "$key"
+          trap 'rm -f "$key"' EXIT
+          if [ "$REMOVE" = "true" ]; then
+            python "$ATALAIA/tools/registry_check.py" badge . "$MODE_ID" "$MODE_VERSION" --remove
+          else
+            python "$ATALAIA/tools/registry_check.py" badge . "$MODE_ID" "$MODE_VERSION" --key "$key"
+          fi
+      - name: The whole registry still passes
+        working-directory: registry
+        run: |
+          check-jsonschema --schemafile "$ATALAIA/registry/schema/index.schema.json" index.json
+          check-jsonschema --schemafile "$ATALAIA/registry/schema/revoked.schema.json" keys/revoked.json
+          python "$ATALAIA/tools/registry_check.py" lint .
+          reuse lint
+      - name: Commit
+        working-directory: registry
+        env:
+          MODE_ID: ${{ inputs.id }}
+          MODE_VERSION: ${{ inputs.version }}
+          REMOVE: ${{ inputs.remove }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if [ "$REMOVE" = "true" ]; then what="remove the verified badge"; else what="verified badge"; fi
+          git commit -m "$MODE_ID $MODE_VERSION: $what (project CI key 7275108d2e3fe583, run by $GITHUB_ACTOR)"
+          git push origin HEAD:main
