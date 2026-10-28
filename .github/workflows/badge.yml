@@ -5,7 +5,8 @@
 # A maintainer runs it by hand (Actions > Verified badge > Run workflow) for a version they
 # reviewed; only people with write access can start it. It signs with
 # tools/registry_check.py badge, checks the whole registry with the same lint as registry.yml,
-# and commits the badge to main, which then publishes through registry.yml.
+# and opens a pull request with the badge (main takes changes only through pull requests);
+# merging it publishes through registry.yml.
 #
 # The private key is the secret ATALAIA_PROJECT_CI_KEY (encrypted PEM) with its passphrase in
 # ATALAIA_PROJECT_CI_KEY_PASSPHRASE. It is written only to the runner's temporary folder, never
@@ -31,6 +32,8 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
+  actions: write  # to start registry.yml on the badge's branch (below)
 
 concurrency:
   group: badge
@@ -86,16 +89,25 @@ jobs:
           check-jsonschema --schemafile "$ATALAIA/registry/schema/revoked.schema.json" keys/revoked.json
           python "$ATALAIA/tools/registry_check.py" lint .
           reuse lint
-      - name: Commit
+      - name: Open a pull request with the badge
         working-directory: registry
         env:
+          GH_TOKEN: ${{ github.token }}
           MODE_ID: ${{ inputs.id }}
           MODE_VERSION: ${{ inputs.version }}
           REMOVE: ${{ inputs.remove }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
           if [ "$REMOVE" = "true" ]; then what="remove the verified badge"; else what="verified badge"; fi
+          branch="badge/$MODE_ID-$MODE_VERSION-$GITHUB_RUN_ID"
+          git switch -c "$branch"
+          git add -A
           git commit -m "$MODE_ID $MODE_VERSION: $what (project CI key 7275108d2e3fe583, run by $GITHUB_ACTOR)"
-          git push origin HEAD:main
+          git push origin "$branch"
+          # A pull request opened with this run's token starts no workflow, so the required
+          # checks would never come; a workflow_dispatch is the one event it may start.
+          gh workflow run registry.yml --ref "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "$MODE_ID $MODE_VERSION: $what" \
+            --body "Signed by the project's CI key (7275108d2e3fe583) in run $GITHUB_RUN_ID, started by @$GITHUB_ACTOR. The registry's checks run on this pull request; merge it to publish."
